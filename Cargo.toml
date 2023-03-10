@@ -1,0 +1,14 @@
+[package]
+name = "executor-service"
+description = "A fast and efficient Thread Pool like Java ExecutorService"
+version = "0.1.0"
+edition = "2021"
+keywords = ["concurrency", "thread", "threadpool", "executor", "ExecutorService"]
+categories = ["concurrency"]
+license-file = "LICENSE"
+homepage = "https://github.com/yerlibilgin/executor-service"
+repository = "https://github.com/yerlibilgin/executor-service"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
