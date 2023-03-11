@@ -3,11 +3,12 @@ use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
 use crate::EventType::{*};
 use std::sync::{Arc, Mutex, Condvar};
 
-
 pub type Runnable = Box<dyn Send + Sync + FnOnce() -> ()>;
+pub type Callable<T> = Box<dyn Send + Sync + FnOnce() -> T>;
 
 enum EventType {
   Execute(Runnable),
+  //ExecuteWait(Callable<T>),
   ExecuteInner((Sender<EventType>, Runnable)),
   Quit,
 }
@@ -17,9 +18,14 @@ pub struct ExecutorService {
 }
 
 impl ExecutorService {
-  pub fn submit(&mut self, fun: Runnable) {
+  pub fn execute(&mut self, fun: Runnable) {
     self.dispatcher.send(Execute(fun)).unwrap();
   }
+
+  //TODO
+  //pub fn submit<T>(&mut self, fun: Callable<T>) {
+  //  self.dispatcher.send(Execute(fun)).unwrap();
+  //}
 }
 
 impl Drop for ExecutorService {
@@ -125,11 +131,43 @@ impl Executors {
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
   use super::*;
+  use std::thread::sleep;
+  use std::thread;
+  use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
+  use crate::EventType::{*};
+  use std::sync::{Arc, Mutex, Condvar};
 
   #[test]
   fn it_works() {
-    let result = add(2, 2);
-    assert_eq!(result, 4);
+    let max = 100;
+    let mut executor_service = Executors::new_fixed_thread_pool(10);
+
+    let (sender, receiver) = sync_channel(max);
+    for i in 0..max {
+      let moved_i = i;
+
+      let sender2 = sender.clone();
+
+      executor_service.execute(Box::new(move || {
+        sleep(Duration::from_millis(10));
+        println!("Hello from {:} {:}", thread::current().name().unwrap(), moved_i);
+        sender2.send(1);
+      }));
+    }
+
+    let mut latch_count = max;
+
+    loop {
+      let _ = &receiver.recv().unwrap();
+      latch_count -= 1;
+
+      if latch_count == 0 {
+        break; //all threads are done
+      }
+    }
+
+    println!("Done!");
   }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "executor-service"
 description = "A fast and efficient Thread Pool like Java ExecutorService"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 keywords = ["concurrency", "thread", "threadpool", "executor", "ExecutorService"]
 categories = ["concurrency"]
