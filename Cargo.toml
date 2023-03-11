@@ -9,6 +9,9 @@ license-file = "LICENSE"
 homepage = "https://github.com/yerlibilgin/executor-service"
 repository = "https://github.com/yerlibilgin/executor-service"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "executor_service"
+path = "src/lib.rs"
+crate-type = ["rlib"]
 
 [dependencies]
