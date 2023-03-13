@@ -1,31 +1,176 @@
+use std::fmt::{Display, Formatter};
 use std::thread;
-use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
+use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender, Receiver, SendError, RecvError};
 use crate::EventType::{*};
 use std::sync::{Arc, Mutex, Condvar};
+use log::trace;
 
 pub type Runnable = Box<dyn Send + Sync + FnOnce() -> ()>;
 pub type Callable<T> = Box<dyn Send + Sync + FnOnce() -> T>;
 
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum ExecutorServiceError {
+  ProcessingError,
+  ResultReceptionError,
+}
+
+impl<T> From<SendError<T>> for ExecutorServiceError {
+  fn from(_: SendError<T>) -> Self {
+    ExecutorServiceError::ProcessingError
+  }
+}
+
+impl From<RecvError> for ExecutorServiceError {
+  fn from(_: RecvError) -> Self {
+    ExecutorServiceError::ResultReceptionError
+  }
+}
+
+pub struct Future<T> {
+  result_receiver: Receiver<T>,
+}
+
+impl<T> Future<T> {
+  pub fn get(&self) -> Result<T, ExecutorServiceError> {
+    Ok(self.result_receiver.recv()?)
+  }
+}
+
 enum EventType {
   Execute(Runnable),
-  //ExecuteWait(Callable<T>),
-  ExecuteInner((Sender<EventType>, Runnable)),
+  ExecuteInner(Sender<EventType>, Runnable),
   Quit,
 }
 
+impl Display for EventType {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    write!(f, "EventType::{:}",
+           match self {
+             Execute(_) => "Execute",
+             ExecuteInner(..) => "ExecuteInner",
+             Quit => "Quit",
+           }
+    )
+  }
+}
+
+///
+/// The executor service that allows tasks to be submitted/executed
+/// on the underlying thread pool.
+/// ```
+/// use executor_service::Executors;
+/// use std::thread::sleep;
+/// use core::time::Duration;
+///
+/// let mut executor_service = Executors::new_fixed_thread_pool(2);
+///
+/// let some_param = "Mr White";
+/// let res = executor_service.submit_sync(Box::new(move || {
+///
+///   sleep(Duration::from_secs(5));
+///   println!("Hello {:}", some_param);
+///   println!("Long lasting computation finished");
+///   2
+/// })).expect("Failed to submit function");
+///
+/// println!("Result: {:#?}", res);
+/// assert_eq!(res, 2);
+///```
 pub struct ExecutorService {
   dispatcher: SyncSender<EventType>,
 }
 
 impl ExecutorService {
-  pub fn execute(&mut self, fun: Runnable) {
-    self.dispatcher.send(Execute(fun)).unwrap();
+  ///
+  /// Execute a function on the thread pool asynchronously with no return.
+  /// ```
+  /// use executor_service::Executors;
+  /// use std::thread::sleep;
+  /// use core::time::Duration;
+  /// use std::thread;
+  ///
+  /// let mut executor_service = Executors::new_fixed_thread_pool(2);
+  ///
+  /// let some_param = "Mr White";
+  /// let res = executor_service.execute(Box::new(move || {
+  ///   sleep(Duration::from_secs(1));
+  ///   println!("Hello from thread {:}", thread::current().name().unwrap());
+  /// })).expect("Failed to execute function");
+  ///
+  /// sleep(Duration::from_secs(3));
+  ///```
+  ///
+  pub fn execute(&mut self, fun: Runnable) -> Result<(), ExecutorServiceError> {
+    Ok(self.dispatcher.send(Execute(fun))?)
   }
 
-  //TODO
-  //pub fn submit<T>(&mut self, fun: Callable<T>) {
-  //  self.dispatcher.send(Execute(fun)).unwrap();
-  //}
+  ///
+  /// Submit a function and wait for its result synchronously
+  /// ```
+  /// use executor_service::Executors;
+  /// use std::thread::sleep;
+  /// use core::time::Duration;
+  ///
+  /// let mut executor_service = Executors::new_fixed_thread_pool(2);
+  ///
+  /// let some_param = "Mr White";
+  /// let res = executor_service.submit_sync(Box::new(move || {
+  ///
+  ///   sleep(Duration::from_secs(5));
+  ///   println!("Hello {:}", some_param);
+  ///   println!("Long lasting computation finished");
+  ///   2
+  /// })).expect("Failed to submit function");
+  ///
+  /// println!("Result: {:#?}", res);
+  /// assert_eq!(res, 2);
+  ///```
+  pub fn submit_sync<T: Sync + Send + 'static>(&mut self, fun: Callable<T>) -> Result<T, ExecutorServiceError> {
+    let (s, r) = sync_channel(1);
+    self.dispatcher.send(Execute(Box::new(move || {
+      let t = fun();
+      s.send(t).unwrap();
+    })))?;
+    Ok(r.recv()?)
+  }
+
+  ///
+  /// Submit a function and get a Future object to obtain the result
+  /// asynchronously when needed.
+  /// ```
+  /// use executor_service::Executors;
+  /// use std::thread::sleep;
+  /// use core::time::Duration;
+  ///
+  /// let mut executor_service = Executors::new_fixed_thread_pool(2);
+  ///
+  /// let some_param = "Mr White";
+  /// let future = executor_service.submit_async(Box::new(move || {
+  ///
+  ///   sleep(Duration::from_secs(3));
+  ///   println!("Hello {:}", some_param);
+  ///   println!("Long lasting computation finished");
+  ///   "Some string result".to_string()
+  /// })).expect("Failed to submit function");
+  ///
+  /// //Wait a bit more to see the future work.
+  /// println!("Main thread wait for 5 seconds");
+  /// sleep(Duration::from_secs(5));
+  /// let res = future.get().expect("Couldn't get a result");
+  /// println!("Result is {:}", &res);
+  /// assert_eq!(&res, "Some string result");
+  ///```
+  pub fn submit_async<T: Sync + Send + 'static>(&mut self, fun: Callable<T>) -> Result<Future<T>, ExecutorServiceError> {
+    let (s, r) = sync_channel(1);
+    self.dispatcher.send(Execute(Box::new(move || {
+      let t = fun();
+      s.send(t).unwrap();
+    })))?;
+
+    Ok(Future {
+      result_receiver: r
+    })
+  }
 }
 
 impl Drop for ExecutorService {
@@ -39,7 +184,7 @@ pub struct Executors;
 
 impl Executors {
   pub fn new_fixed_thread_pool(thread_count: u32) -> ExecutorService {
-    let mut guarded_count= thread_count;
+    let mut guarded_count = thread_count;
     if guarded_count > 80 {
       guarded_count = 80;
     }
@@ -62,27 +207,27 @@ impl Executors {
       thread::Builder::new()
         .name(format!("Thread-{:}", i)).spawn(move || {
         loop {
-          //println!("{:} Waiting for job", thread::current().name().unwrap());
+          //trace!("{:} Waiting for job", thread::current().name().unwrap());
           let fun = r.recv().unwrap();
-          //println!("{:} Received func", thread::current().name().unwrap());
+          //trace!("{:} Received func", thread::current().name().unwrap());
           match fun {
-            ExecuteInner((sender, fun)) => {
+            ExecuteInner(sender, fun) => {
               fun();
-              //println!("{:} Send result", thread::current().name().unwrap());
+              //trace!("{:} Send result", thread::current().name().unwrap());
               if let Ok(mut lock) = vec_clone.lock() {
                 lock.push(sender);
-                //println!("Notify waiters for finish");
+                //trace!("Notify waiters for finish");
                 cv_clone.notify_all();
               }
             }
             Quit => {
-              println!("{:} Received exit", thread::current().name().unwrap());
+              trace!("{:} Received exit", thread::current().name().unwrap());
               break;
             }
             _ => {}
           }
         }
-        //println!("{:} Loop done", thread::current().name().unwrap())
+        //trace!("{:} Loop done", thread::current().name().unwrap())
       }).unwrap();
     }
 
@@ -99,17 +244,17 @@ impl Executors {
               };
 
               if let Ok(mut lock) = available.lock() {
-                //println!("Available: {:}", lock.len());
+                //trace!("Available: {:}", lock.len());
                 let the_sender = lock.pop().unwrap();
-                //println!("Available: {:}", lock.len());
-                the_sender.send(ExecuteInner((the_sender.clone(), func))).unwrap();
+                //trace!("Available: {:}", lock.len());
+                the_sender.send(ExecuteInner(the_sender.clone(), func)).unwrap();
               };
             }
             Quit => {
-              //println!("Dispatcher received Quit");
+              //trace!("Dispatcher received Quit");
               if let Ok(lock) = available.lock() {
                 for x in &*lock {
-                  println!("AV Send quit");
+                  trace!("AV Send quit");
                   let _ = x.send(EventType::Quit);
                 }
               }
@@ -119,7 +264,7 @@ impl Executors {
             _ => {}
           }
         }
-        println!("Dispatcher exit");
+        trace!("Dispatcher exit");
       }).unwrap();
 
     ExecutorService {
@@ -135,12 +280,13 @@ mod tests {
   use super::*;
   use std::thread::sleep;
   use std::thread;
-  use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
-  use crate::EventType::{*};
-  use std::sync::{Arc, Mutex, Condvar};
+  use std::sync::mpsc::sync_channel;
+  use env_logger::{Builder, Env};
+  use log::{debug, info};
 
   #[test]
-  fn it_works() {
+  fn test_execute() -> Result<(), ExecutorServiceError> {
+    Builder::from_env(Env::default().default_filter_or("trace")).init();
     let max = 100;
     let mut executor_service = Executors::new_fixed_thread_pool(10);
 
@@ -152,9 +298,9 @@ mod tests {
 
       executor_service.execute(Box::new(move || {
         sleep(Duration::from_millis(10));
-        println!("Hello from {:} {:}", thread::current().name().unwrap(), moved_i);
-        sender2.send(1);
-      }));
+        info!("Hello from {:} {:}", thread::current().name().unwrap(), moved_i);
+        sender2.send(1).expect("Send failed");
+      }))?;
     }
 
     let mut latch_count = max;
@@ -166,8 +312,51 @@ mod tests {
       if latch_count == 0 {
         break; //all threads are done
       }
-    }
+    };
 
-    println!("Done!");
+    Ok(())
+  }
+
+  #[test]
+  fn test_submit_sync() -> Result<(), ExecutorServiceError> {
+    Builder::from_env(Env::default().default_filter_or("trace")).init();
+    let mut executor_service = Executors::new_fixed_thread_pool(2);
+
+    let some_param = "Mr White";
+    let res = executor_service.submit_sync(Box::new(move || {
+      info!("Long lasting computation");
+      sleep(Duration::from_secs(5));
+      debug!("Hello {:}", some_param);
+      info!("Long lasting computation finished");
+      2
+    }))?;
+
+    trace!("Result: {:#?}", res);
+    assert_eq!(res, 2);
+    Ok(())
+  }
+
+  #[test]
+  fn test_submit_async() -> Result<(), ExecutorServiceError> {
+    Builder::from_env(Env::default().default_filter_or("trace")).init();
+    let mut executor_service = Executors::new_fixed_thread_pool(2);
+
+    let some_param = "Mr White";
+    let res: Future<String> = executor_service.submit_async(Box::new(move || {
+      info!("Long lasting computation");
+      sleep(Duration::from_secs(5));
+      debug!("Hello {:}", some_param);
+      info!("Long lasting computation finished");
+      "A string as a result".to_string()
+    }))?;
+
+    //Wait a bit more to see the future work.
+    info!("Main thread wait for 7 seconds");
+    sleep(Duration::from_secs(7));
+    info!("Main thread resumes after 7 seconds, consuming the future");
+    let the_string = res.get()?;
+    trace!("Result: {:#?}", &the_string);
+    assert_eq!(&the_string, "A string as a result");
+    Ok(())
   }
 }
