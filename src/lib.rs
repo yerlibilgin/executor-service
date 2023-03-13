@@ -1,4 +1,5 @@
 use std::fmt::{Display, Formatter};
+use std::io::Error;
 use std::thread;
 use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender, Receiver, SendError, RecvError};
 use crate::EventType::{*};
@@ -8,8 +9,10 @@ use log::trace;
 pub type Runnable = Box<dyn Send + Sync + FnOnce() -> ()>;
 pub type Callable<T> = Box<dyn Send + Sync + FnOnce() -> T>;
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Debug)]
 pub enum ExecutorServiceError {
+  ParameterError(String),
+  IOError(std::io::Error),
   ProcessingError,
   ResultReceptionError,
 }
@@ -26,9 +29,17 @@ impl From<RecvError> for ExecutorServiceError {
   }
 }
 
+impl From<std::io::Error> for ExecutorServiceError {
+  fn from(value: Error) -> Self {
+    ExecutorServiceError::IOError(value)
+  }
+}
+
 impl Display for ExecutorServiceError {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     match self {
+      ExecutorServiceError::ParameterError(message) => write!(f, "{:}: {:}", "ParameterError", message.as_str()),
+      ExecutorServiceError::IOError(io_error) => write!(f, "{:}: {:}", "IOError", io_error),
       ExecutorServiceError::ResultReceptionError => write!(f, "{:}", "ResultReceptionError"),
       ExecutorServiceError::ProcessingError => write!(f, "{:}", "ProcessingError"),
     }
@@ -73,7 +84,7 @@ impl Display for EventType {
 /// use std::thread::sleep;
 /// use core::time::Duration;
 ///
-/// let mut executor_service = Executors::new_fixed_thread_pool(2);
+/// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
 ///
 /// let some_param = "Mr White";
 /// let res = executor_service.submit_sync(Box::new(move || {
@@ -100,7 +111,7 @@ impl ExecutorService {
   /// use core::time::Duration;
   /// use std::thread;
   ///
-  /// let mut executor_service = Executors::new_fixed_thread_pool(2);
+  /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
   ///
   /// let some_param = "Mr White";
   /// let res = executor_service.execute(Box::new(move || {
@@ -122,7 +133,7 @@ impl ExecutorService {
   /// use std::thread::sleep;
   /// use core::time::Duration;
   ///
-  /// let mut executor_service = Executors::new_fixed_thread_pool(2);
+  /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
   ///
   /// let some_param = "Mr White";
   /// let res = executor_service.submit_sync(Box::new(move || {
@@ -153,7 +164,7 @@ impl ExecutorService {
   /// use std::thread::sleep;
   /// use core::time::Duration;
   ///
-  /// let mut executor_service = Executors::new_fixed_thread_pool(2);
+  /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
   ///
   /// let some_param = "Mr White";
   /// let future = executor_service.submit_async(Box::new(move || {
@@ -194,19 +205,23 @@ impl Drop for ExecutorService {
 pub struct Executors;
 
 impl Executors {
-  pub fn new_fixed_thread_pool(thread_count: u32) -> ExecutorService {
-    let mut guarded_count = thread_count;
-    if guarded_count > 80 {
-      guarded_count = 80;
+  ///
+  /// Creates a thread pool with a fixed size. All threads are initialized at first.
+  ///
+  /// `REMARKS`: The maximum value for `thread_count` is currently 100
+  /// If you go beyond that, the function will fail, producing an `ExecutorServiceError::ParameterError`
+  ///
+  pub fn new_fixed_thread_pool(thread_count: u32) -> Result<ExecutorService, ExecutorServiceError> {
+    if thread_count > 100 {
+      return Err(ExecutorServiceError::ProcessingError)
     }
-
     let available = Arc::new(Mutex::new(vec![]));
 
     let (sender, receiver) = sync_channel::<EventType>(1);
 
     let pair = Arc::new(Condvar::new());
 
-    for i in 0..guarded_count {
+    for i in 0..thread_count {
       let (s, r) = channel::<EventType>();
 
       if let Ok(mut lock) = available.lock() {
@@ -239,7 +254,7 @@ impl Executors {
           }
         }
         //trace!("{:} Loop done", thread::current().name().unwrap())
-      }).unwrap();
+      })?;
     }
 
     thread::Builder::new()
@@ -276,11 +291,11 @@ impl Executors {
           }
         }
         trace!("Dispatcher exit");
-      }).unwrap();
+      })?;
 
-    ExecutorService {
+    Ok(ExecutorService {
       dispatcher: sender
-    }
+    })
   }
 }
 
@@ -304,7 +319,7 @@ mod tests {
   #[test]
   fn test_execute() -> Result<(), ExecutorServiceError> {
     let max = 100;
-    let mut executor_service = Executors::new_fixed_thread_pool(10);
+    let mut executor_service = Executors::new_fixed_thread_pool(10)?;
 
     let (sender, receiver) = sync_channel(max);
     for i in 0..max {
@@ -335,7 +350,7 @@ mod tests {
 
   #[test]
   fn test_submit_sync() -> Result<(), ExecutorServiceError> {
-    let mut executor_service = Executors::new_fixed_thread_pool(2);
+    let mut executor_service = Executors::new_fixed_thread_pool(2)?;
 
     let some_param = "Mr White";
     let res = executor_service.submit_sync(Box::new(move || {
@@ -353,7 +368,7 @@ mod tests {
 
   #[test]
   fn test_submit_async() -> Result<(), ExecutorServiceError> {
-    let mut executor_service = Executors::new_fixed_thread_pool(2);
+    let mut executor_service = Executors::new_fixed_thread_pool(2)?;
 
     let some_param = "Mr White";
     let res: Future<String> = executor_service.submit_async(Box::new(move || {
