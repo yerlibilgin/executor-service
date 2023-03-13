@@ -1,4 +1,9 @@
 # executor-service
 
-A thread pool implementation that is like Java's ExecutorService.
+![rust_workflow](https://github.com/yerlibilgin/executor-service/.github/workflows/rust.yml/badge.svg)
+
+
+A Java ExecutorService style thread pool implementation for Rust.
+
+
 

@@ -26,6 +26,17 @@ impl From<RecvError> for ExecutorServiceError {
   }
 }
 
+impl Display for ExecutorServiceError {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    match self {
+      ExecutorServiceError::ResultReceptionError => write!(f, "{:}", "ResultReceptionError"),
+      ExecutorServiceError::ProcessingError => write!(f, "{:}", "ProcessingError"),
+    }
+  }
+}
+
+impl std::error::Error for ExecutorServiceError{}
+
 pub struct Future<T> {
   result_receiver: Receiver<T>,
 }
@@ -283,10 +294,16 @@ mod tests {
   use std::sync::mpsc::sync_channel;
   use env_logger::{Builder, Env};
   use log::{debug, info};
+  use std::sync::Once;
+
+  #[cfg(test)]
+  #[ctor::ctor]
+  fn init_env_logger() {
+    Builder::from_env(Env::default().default_filter_or("trace")).init();
+  }
 
   #[test]
   fn test_execute() -> Result<(), ExecutorServiceError> {
-    Builder::from_env(Env::default().default_filter_or("trace")).init();
     let max = 100;
     let mut executor_service = Executors::new_fixed_thread_pool(10);
 
@@ -319,7 +336,6 @@ mod tests {
 
   #[test]
   fn test_submit_sync() -> Result<(), ExecutorServiceError> {
-    Builder::from_env(Env::default().default_filter_or("trace")).init();
     let mut executor_service = Executors::new_fixed_thread_pool(2);
 
     let some_param = "Mr White";
@@ -338,7 +354,6 @@ mod tests {
 
   #[test]
   fn test_submit_async() -> Result<(), ExecutorServiceError> {
-    Builder::from_env(Env::default().default_filter_or("trace")).init();
     let mut executor_service = Executors::new_fixed_thread_pool(2);
 
     let some_param = "Mr White";
