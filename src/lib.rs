@@ -294,7 +294,6 @@ mod tests {
   use std::sync::mpsc::sync_channel;
   use env_logger::{Builder, Env};
   use log::{debug, info};
-  use std::sync::Once;
 
   #[cfg(test)]
   #[ctor::ctor]
