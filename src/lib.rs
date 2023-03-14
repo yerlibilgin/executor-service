@@ -1,11 +1,11 @@
 use std::fmt::{Display, Formatter};
+use std::marker::PhantomData;
 use std::thread;
 use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender, Receiver, SendError, RecvError};
 use std::sync::{Arc, Mutex, Condvar};
 use log::trace;
 
-pub type Runnable = Box<dyn Send + Sync + FnOnce() -> ()>;
-pub type Callable<T> = Box<dyn Send + Sync + FnOnce() -> T>;
+pub type Runnable<T> = dyn Send + 'static + FnOnce() -> T;
 
 ///
 /// Maximum number of threads that can be requested for a pool
@@ -65,34 +65,51 @@ impl Display for ExecutorServiceError {
 
 impl std::error::Error for ExecutorServiceError {}
 
-pub struct Future<T> {
+pub struct Future<T: Send + 'static> {
   result_receiver: Receiver<T>,
 }
 
-impl<T> Future<T> {
+impl<T: Send + 'static> Future<T> {
   pub fn get(&self) -> Result<T, ExecutorServiceError> {
     Ok(self.result_receiver.recv()?)
   }
 }
 
-enum EventType {
-  Execute(Runnable),
-  ExecuteInner(Sender<Self>, Runnable),
+enum DispatcherEventType<F, T>
+  where F: FnOnce() -> T,
+        T: Send + 'static,
+        F: Send + 'static
+{
+  Execute(Option<SyncSender<T>>, F),
   Quit,
 }
 
-#[derive(Debug)]
-enum DispatchResult {
-  ExecutionSubmissionResult(Result<(), ExecutorServiceError>),
-  ThreadCount(u32),
+enum EventType<F, T>
+  where F: FnOnce() -> T,
+        T: Send + 'static,
+        F: Send + 'static
+{
+  Execute(Option<SyncSender<T>>, Sender<Self>, F),
+  Quit,
 }
 
-impl Display for EventType {
+
+impl<F: Send + 'static + FnOnce() -> T, T: Send + 'static> Display for DispatcherEventType<F, T> {
   fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
     write!(f, "EventType::{:}",
            match self {
-             Self::Execute(_) => "Execute",
-             Self::ExecuteInner(..) => "ExecuteInner",
+             Self::Execute(_, _) => "Execute",
+             Self::Quit => "Quit",
+           }
+    )
+  }
+}
+
+impl<F: Send + 'static + FnOnce() -> T, T: Send + 'static> Display for EventType<F, T> {
+  fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    write!(f, "EventType::{:}",
+           match self {
+             Self::Execute(_, _, _) => "Execute",
              Self::Quit => "Quit",
            }
     )
@@ -121,13 +138,19 @@ impl Display for EventType {
 /// println!("Result: {:#?}", res);
 /// assert_eq!(res, 2);
 ///```
-pub struct ExecutorService {
-  dispatcher: SyncSender<EventType>,
+pub struct ExecutorService<F, T>
+  where F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static {
+  dispatcher: SyncSender<DispatcherEventType<F, T>>,
   pool_type: PoolType,
   thread_count: Arc<Mutex<u32>>,
 }
 
-impl ExecutorService {
+impl<F, T> ExecutorService<F, T>
+  where F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static {
   ///
   /// Execute a function on the thread pool asynchronously with no return.
   /// ```
@@ -147,8 +170,8 @@ impl ExecutorService {
   /// sleep(Duration::from_secs(3));
   ///```
   ///
-  pub fn execute(&mut self, fun: Runnable) -> Result<(), ExecutorServiceError> {
-    Ok(self.dispatcher.send(EventType::Execute(fun))?)
+  pub fn execute(&mut self, fun: F) -> Result<(), ExecutorServiceError> {
+    Ok(self.dispatcher.send(DispatcherEventType::Execute(None, fun))?)
   }
 
   ///
@@ -161,23 +184,20 @@ impl ExecutorService {
   /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
   ///
   /// let some_param = "Mr White";
-  /// let res = executor_service.submit_sync(Box::new(move || {
+  /// let res = executor_service.submit_sync(move || {
   ///
   ///   sleep(Duration::from_secs(5));
   ///   println!("Hello {:}", some_param);
   ///   println!("Long lasting computation finished");
   ///   2
-  /// })).expect("Failed to submit function");
+  /// }).expect("Failed to submit function");
   ///
   /// println!("Result: {:#?}", res);
   /// assert_eq!(res, 2);
   ///```
-  pub fn submit_sync<T: Sync + Send + 'static>(&mut self, fun: Callable<T>) -> Result<T, ExecutorServiceError> {
+  pub fn submit_sync(&mut self, fun: F) -> Result<T, ExecutorServiceError> {
     let (s, r) = sync_channel(1);
-    self.dispatcher.send(EventType::Execute(Box::new(move || {
-      let t = fun();
-      s.send(t).unwrap();
-    })))?;
+    self.dispatcher.send(DispatcherEventType::Execute(Some(s), fun))?;
     Ok(r.recv()?)
   }
 
@@ -207,12 +227,10 @@ impl ExecutorService {
   /// println!("Result is {:}", &res);
   /// assert_eq!(&res, "Some string result");
   ///```
-  pub fn submit_async<T: Sync + Send + 'static>(&mut self, fun: Callable<T>) -> Result<Future<T>, ExecutorServiceError> {
+  pub fn submit_async(&mut self, fun: F) -> Result<Future<T>, ExecutorServiceError>
+  {
     let (s, r) = sync_channel(1);
-    self.dispatcher.send(EventType::Execute(Box::new(move || {
-      let t = fun();
-      s.send(t).unwrap();
-    })))?;
+    self.dispatcher.send(DispatcherEventType::Execute(Some(s), fun))?;
 
     Ok(Future {
       result_receiver: r
@@ -232,23 +250,32 @@ impl ExecutorService {
   }
 }
 
-impl Drop for ExecutorService {
+impl<F, T> Drop for ExecutorService<F, T>
+  where F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static {
   fn drop(&mut self) {
-    self.dispatcher.send(EventType::Quit).unwrap();
+    self.dispatcher.send(DispatcherEventType::Quit).unwrap();
   }
 }
 
 
-pub struct Executors;
+pub struct Executors<F, T> where F: FnOnce() -> T,
+                                 F: Send + 'static,
+                                 T: Send + 'static {
+  _phantom: PhantomData<F>,
+}
 
-impl Executors {
+impl<F, T> Executors<F, T> where F: FnOnce() -> T,
+                                 F: Send + 'static,
+                                 T: Send + 'static {
   ///
   /// Creates a thread pool with a fixed size. All threads are initialized at first.
   ///
   /// `REMARKS`: The maximum value for [thread_count] is currently [MAX_THREAD_COUNT]
   /// If you go beyond that, the function will fail, producing an [ExecutorServiceError::ParameterError]
   ///
-  pub fn new_fixed_thread_pool(thread_count: u32) -> Result<ExecutorService, ExecutorServiceError> {
+  pub fn new_fixed_thread_pool(thread_count: u32) -> Result<ExecutorService<F, T>, ExecutorServiceError> {
     if thread_count > MAX_THREAD_COUNT {
       return Err(ExecutorServiceError::ProcessingError);
     }
@@ -277,7 +304,7 @@ impl Executors {
   /// If more requests come and all threads are busy and we have a maximum of [MAX_THREAD_COUNT] threads,
   /// then it will behave like a constant thread pool.
   ///
-  pub fn new_cached_thread_pool(initial_thread_count: Option<u32>) -> Result<ExecutorService, ExecutorServiceError> {
+  pub fn new_cached_thread_pool(initial_thread_count: Option<u32>) -> Result<ExecutorService<F, T>, ExecutorServiceError> {
     let initial_count = if let Some(count) = initial_thread_count {
       if count > MAX_THREAD_COUNT {
         return Err(ExecutorServiceError::ParameterError(format!("Max thread count is {:}", MAX_THREAD_COUNT)));
@@ -300,15 +327,16 @@ impl Executors {
     })
   }
 
-  fn prepare_pool(initial_count: u32, pool_type: PoolType, thread_count_mutex: Arc<Mutex<u32>>) -> Result<SyncSender<EventType>, ExecutorServiceError> {
+  fn prepare_pool(initial_count: u32, pool_type: PoolType, thread_count_mutex: Arc<Mutex<u32>>)
+                  -> Result<SyncSender<DispatcherEventType<F, T>>, ExecutorServiceError> {
     let available = Arc::new(Mutex::new(vec![]));
 
-    let (sender, receiver) = sync_channel::<EventType>(1);
+    let (sender, receiver) = sync_channel(1);
 
     let pool_waiter = Arc::new(Condvar::new());
 
     for i in 0..initial_count {
-      let (s, r) = channel::<EventType>();
+      let (s, r) = channel();
 
       if let Ok(mut lock) = available.lock() {
         lock.push(s);
@@ -321,14 +349,21 @@ impl Executors {
     Ok(sender)
   }
 
-  fn create_thread(i: u32, r: Receiver<EventType>, vec_clone: Arc<Mutex<Vec<Sender<EventType>>>>, cv_clone: Arc<Condvar>) -> Result<(), ExecutorServiceError> {
+  fn create_thread(i: u32, r: Receiver<EventType<F, T>>,
+                   vec_clone: Arc<Mutex<Vec<Sender<EventType<F, T>>>>>,
+                   cv_clone: Arc<Condvar>)
+                   -> Result<(), ExecutorServiceError> {
     thread::Builder::new()
       .name(format!("Thread-{:}", i)).spawn(move || {
       loop {
         let fun = r.recv().unwrap();
         match fun {
-          EventType::ExecuteInner(sender, fun) => {
-            fun();
+          EventType::Execute(result_sender, sender, fun) => {
+            let t = fun();
+            if let Some(res_sender) = result_sender {
+              //TODO: Check the result
+              res_sender.send(t).unwrap();
+            }
             if let Ok(mut lock) = vec_clone.lock() {
               lock.push(sender);
               cv_clone.notify_all();
@@ -338,7 +373,6 @@ impl Executors {
             trace!("{:} Received exit", thread::current().name().unwrap());
             break;
           }
-          _ => {}
         }
       }
       //trace!("{:} Loop done", thread::current().name().unwrap())
@@ -347,8 +381,8 @@ impl Executors {
     Ok(())
   }
 
-  fn prepare_dispatcher(available: Arc<Mutex<Vec<Sender<EventType>>>>,
-                        receiver: Receiver<EventType>,
+  fn prepare_dispatcher(available: Arc<Mutex<Vec<Sender<EventType<F, T>>>>>,
+                        receiver: Receiver<DispatcherEventType<F, T>>,
                         pool_waiter: Arc<Condvar>,
                         pool_type: PoolType,
                         current_thread_count: u32,
@@ -360,7 +394,7 @@ impl Executors {
         let mut current_thread_count = current_thread_count;
         loop {
           match receiver.recv().unwrap() {
-            EventType::Execute(func) => {
+            DispatcherEventType::Execute(result_sender, func) => {
               if let Ok(mut lock) = available.lock() {
                 if lock.is_empty() {
                   //threads are busy
@@ -369,7 +403,7 @@ impl Executors {
                       //the pool is cached.
                       if current_thread_count < MAX_THREAD_COUNT {
                         //spawn a new thread
-                        let (s, r) = channel::<EventType>();
+                        let (s, r) = channel::<EventType<F, T>>();
                         lock.push(s);
                         //FIXME: use this result!
                         Self::create_thread(current_thread_count, r, available.clone(), pool_waiter.clone());
@@ -393,10 +427,10 @@ impl Executors {
                 //trace!("Available: {:}", lock.len());
                 let the_sender = lock.pop().unwrap();
                 //trace!("Available: {:}", lock.len());
-                the_sender.send(EventType::ExecuteInner(the_sender.clone(), func)).unwrap();
+                the_sender.send(EventType::Execute(result_sender, the_sender.clone(), func)).unwrap();
               };
             }
-            EventType::Quit => {
+            DispatcherEventType::Quit => {
               //trace!("Dispatcher received Quit");
               if let Ok(lock) = available.lock() {
                 for x in &*lock {
@@ -407,7 +441,6 @@ impl Executors {
 
               break;
             }
-            _ => {}
           }
         }
         trace!("Dispatcher exit");
@@ -511,38 +544,52 @@ mod tests {
   fn test_cahced_thread_pool_execute() -> Result<(), ExecutorServiceError> {
     let mut executor_service = Executors::new_cached_thread_pool(None)?;
 
-    let (s, r) = sync_channel(1);
+    let (s, r) = channel();
     let some_param = "Mr White";
-    for i in 0..100 {
+
+    for _ in 0..100 {
       let s = s.clone();
       sleep(Duration::from_millis(100));
-      executor_service.execute(Box::new(move || {
-        info!("Long lasting computation");
-        sleep(Duration::from_millis(500));
+      debug!("Thread count is {:}", executor_service.get_thread_count().unwrap());
+      executor_service.execute(move || {
+        info!("Long lasting computation Thread:{:}", thread::current().name().unwrap());
+        sleep(Duration::from_millis(15000));
         debug!("Hello {:}", some_param);
         info!("Long lasting computation finished");
         s.send("asdf").expect("Cannot send");
-      }))?;
+      })?;
+
     }
 
-    for i in 0..100 {
+    for _ in 0..100 {
       r.recv().expect("Cannot receive");
-      println!("Thread count is {:}", executor_service.get_thread_count()?)
     }
+
     Ok(())
   }
 
 
   #[test]
-  fn test_channel() -> Result<(), ExecutorServiceError> {
-    let (s, r) = channel();
-    let s1 = s.clone();
-    thread::spawn(Box::new(move || {
-      s1.send("asdf").expect("Cannot send");
-    }));
+  fn test_submit_async_cached() -> Result<(), ExecutorServiceError> {
+    let mut executor_service = Executors::new_cached_thread_pool(Some(5))?;
 
-    r.recv().expect("");
+    info!("{:?}", executor_service.get_thread_count());
+    let some_param = "Mr White";
+    let res: Future<String> = executor_service.submit_async(Box::new(move || {
+      info!("Long lasting computation");
+      sleep(Duration::from_secs(5));
+      debug!("Hello {:}", some_param);
+      info!("Long lasting computation finished");
+      "A string as a result".to_string()
+    }))?;
 
+    //Wait a bit more to see the future work.
+    info!("Main thread wait for 7 seconds");
+    sleep(Duration::from_secs(7));
+    info!("Main thread resumes after 7 seconds, consuming the future");
+    let the_string = res.get()?;
+    trace!("Result: {:#?}", &the_string);
+    assert_eq!(&the_string, "A string as a result");
     Ok(())
   }
 }
