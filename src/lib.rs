@@ -69,6 +69,7 @@ pub struct Future<T: Send + 'static> {
   result_receiver: Receiver<T>,
 }
 
+
 impl<T: Send + 'static> Future<T> {
   pub fn get(&self) -> Result<T, ExecutorServiceError> {
     Ok(self.result_receiver.recv()?)
@@ -127,13 +128,13 @@ impl<F: Send + 'static + FnOnce() -> T, T: Send + 'static> Display for EventType
 /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
 ///
 /// let some_param = "Mr White";
-/// let res = executor_service.submit_sync(Box::new(move || {
+/// let res = executor_service.submit_sync(move || {
 ///
 ///   sleep(Duration::from_secs(5));
 ///   println!("Hello {:}", some_param);
-///   println!("Long lasting computation finished");
+///   println!("Long computation finished");
 ///   2
-/// })).expect("Failed to submit function");
+/// }).expect("Failed to submit function");
 ///
 /// println!("Result: {:#?}", res);
 /// assert_eq!(res, 2);
@@ -162,10 +163,10 @@ impl<F, T> ExecutorService<F, T>
   /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
   ///
   /// let some_param = "Mr White";
-  /// let res = executor_service.execute(Box::new(move || {
+  /// let res = executor_service.execute(move || {
   ///   sleep(Duration::from_secs(1));
-  ///   println!("Hello from thread {:}", thread::current().name().unwrap());
-  /// })).expect("Failed to execute function");
+  ///   println!("Hello {:} from thread {:}", some_param, thread::current().name().unwrap());
+  /// }).expect("Failed to execute function");
   ///
   /// sleep(Duration::from_secs(3));
   ///```
@@ -181,14 +182,14 @@ impl<F, T> ExecutorService<F, T>
   /// use std::thread::sleep;
   /// use core::time::Duration;
   ///
-  /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
+  /// let mut executor_service = Executors::new_cached_thread_pool(None).expect("Failed to create the thread pool");
   ///
   /// let some_param = "Mr White";
   /// let res = executor_service.submit_sync(move || {
   ///
   ///   sleep(Duration::from_secs(5));
   ///   println!("Hello {:}", some_param);
-  ///   println!("Long lasting computation finished");
+  ///   println!("Long computation finished");
   ///   2
   /// }).expect("Failed to submit function");
   ///
@@ -209,14 +210,14 @@ impl<F, T> ExecutorService<F, T>
   /// use std::thread::sleep;
   /// use core::time::Duration;
   ///
-  /// let mut executor_service = Executors::new_fixed_thread_pool(2).expect("Failed to create the thread pool");
+  /// let mut executor_service = Executors::new_cached_thread_pool(Some(5)).expect("Failed to create the thread pool");
   ///
   /// let some_param = "Mr White";
   /// let future = executor_service.submit_async(Box::new(move || {
   ///
   ///   sleep(Duration::from_secs(3));
   ///   println!("Hello {:}", some_param);
-  ///   println!("Long lasting computation finished");
+  ///   println!("Long computation finished");
   ///   "Some string result".to_string()
   /// })).expect("Failed to submit function");
   ///
@@ -505,10 +506,10 @@ mod tests {
 
     let some_param = "Mr White";
     let res = executor_service.submit_sync(Box::new(move || {
-      info!("Long lasting computation");
+      info!("Long computation");
       sleep(Duration::from_secs(5));
       debug!("Hello {:}", some_param);
-      info!("Long lasting computation finished");
+      info!("Long computation finished");
       2
     }))?;
 
@@ -523,10 +524,10 @@ mod tests {
 
     let some_param = "Mr White";
     let res: Future<String> = executor_service.submit_async(Box::new(move || {
-      info!("Long lasting computation");
+      info!("Long computation");
       sleep(Duration::from_secs(5));
       debug!("Hello {:}", some_param);
-      info!("Long lasting computation finished");
+      info!("Long computation finished");
       "A string as a result".to_string()
     }))?;
 
@@ -552,13 +553,12 @@ mod tests {
       sleep(Duration::from_millis(100));
       debug!("Thread count is {:}", executor_service.get_thread_count().unwrap());
       executor_service.execute(move || {
-        info!("Long lasting computation Thread:{:}", thread::current().name().unwrap());
+        info!("Long computation Thread:{:}", thread::current().name().unwrap());
         sleep(Duration::from_millis(15000));
         debug!("Hello {:}", some_param);
-        info!("Long lasting computation finished");
+        info!("Long computation finished");
         s.send("asdf").expect("Cannot send");
       })?;
-
     }
 
     for _ in 0..100 {
@@ -575,11 +575,11 @@ mod tests {
 
     info!("{:?}", executor_service.get_thread_count());
     let some_param = "Mr White";
-    let res: Future<String> = executor_service.submit_async(Box::new(move || {
-      info!("Long lasting computation");
+    let the_future: Future<String> = executor_service.submit_async(Box::new(move || {
+      info!("Long computation");
       sleep(Duration::from_secs(5));
       debug!("Hello {:}", some_param);
-      info!("Long lasting computation finished");
+      info!("Long computation finished");
       "A string as a result".to_string()
     }))?;
 
@@ -587,9 +587,13 @@ mod tests {
     info!("Main thread wait for 7 seconds");
     sleep(Duration::from_secs(7));
     info!("Main thread resumes after 7 seconds, consuming the future");
-    let the_string = res.get()?;
-    trace!("Result: {:#?}", &the_string);
-    assert_eq!(&the_string, "A string as a result");
+
+
+    thread::spawn(move || {
+      let the_string = the_future.get().expect("No result");
+      trace!("Result: {:#?}", &the_string);
+      assert_eq!(&the_string, "A string as a result");
+    }).join().expect("Join failed");
     Ok(())
   }
 }
